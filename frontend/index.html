@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI Storyteller</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <header>
+    <h1>🌙 AI Storyteller</h1>
+    <p class="tagline">Personalized bedtime stories, written by a tiny crew of AI authors and read aloud.</p>
+  </header>
+
+  <main>
+    <!-- LEFT: build a story -->
+    <section class="card">
+      <h2>1 · Who is tonight's story for?</h2>
+      <div class="row">
+        <label>Child's name
+          <input id="subjectName" type="text" placeholder="e.g. Maya" />
+        </label>
+        <label class="narrow">Age
+          <input id="subjectAge" type="number" min="0" max="17" placeholder="6" />
+        </label>
+      </div>
+
+      <h2>2 · Story details</h2>
+      <label>Setting / location
+        <input id="location" type="text" placeholder="e.g. a glowing coral reef" />
+      </label>
+      <label>Themes <span class="hint">(comma-separated)</span>
+        <input id="themes" type="text" placeholder="e.g. kindness, courage, sharing" />
+      </label>
+      <label>Interests <span class="hint">(comma-separated)</span>
+        <input id="interests" type="text" placeholder="e.g. dinosaurs, space, painting" />
+      </label>
+      <label>Story genre
+        <select id="genre">
+          <option value="Fluffy" selected>Fluffy — light, cozy &amp; casual</option>
+          <option value="Fantasy">Fantasy — magic &amp; enchanted worlds</option>
+          <option value="Science-Fiction">Science-Fiction — space, robots &amp; gadgets</option>
+          <option value="Suspense">Suspense — gentle mystery &amp; intrigue</option>
+          <option value="Horror">Horror — spooky (tone scales with rating)</option>
+        </select>
+      </label>
+      <label>Maximum content rating
+        <select id="rating">
+          <option value="G" selected>G — wholesome &amp; gentle (best for bedtime)</option>
+          <option value="PG">PG — mild peril / light humor</option>
+          <option value="PG-13">PG-13 — more adventure tension</option>
+          <option value="R">R — mature themes</option>
+        </select>
+      </label>
+      <label>Extra notes for the writers <span class="hint">(optional)</span>
+        <textarea id="extraNotes" rows="2" placeholder="e.g. include her dog Pepper; keep it extra calm"></textarea>
+      </label>
+
+      <h2>3 · Cast (optional)</h2>
+      <p class="hint">Pick recurring characters to include. Each has a fixed voice so they sound the same every story.</p>
+      <div id="characterList" class="character-list"></div>
+
+      <details class="add-char">
+        <summary>+ Add a new character</summary>
+        <label>Name <input id="ncName" type="text" placeholder="e.g. Captain Pebble" /></label>
+        <label>Persona / personality
+          <input id="ncPersona" type="text" placeholder="e.g. a brave, silly turtle who loves riddles" />
+        </label>
+        <label>Voice
+          <select id="ncSpeaker"></select>
+        </label>
+        <button id="addCharacterBtn" class="secondary" type="button">Save character</button>
+        <p id="addCharMsg" class="msg"></p>
+      </details>
+
+      <button id="startBtn" class="primary big" type="button">✨ Build Tonight's Story</button>
+    </section>
+
+    <!-- RIGHT: tonight's story + library -->
+    <section class="card">
+      <h2>Tonight's Story</h2>
+      <div id="readiness" class="readiness hidden">
+        <div class="bar"><div id="barFill" class="bar-fill"></div></div>
+        <p id="stageLabel" class="stage"></p>
+      </div>
+      <p id="noStory" class="hint">Fill out the form and press <b>Build Tonight's Story</b>.</p>
+
+      <div id="player" class="player hidden">
+        <h3 id="storyTitle"></h3>
+        <audio id="audio" controls></audio>
+        <p class="hint placeholder-note">🔊 Narration uses local Qwen3-TTS when the model is installed; otherwise a silent placeholder is used.</p>
+        <button id="toggleScript" class="secondary" type="button">Show script</button>
+        <div id="script" class="script hidden"></div>
+      </div>
+
+      <h2 class="lib-head">📚 Story Library</h2>
+      <div id="library" class="library"></div>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

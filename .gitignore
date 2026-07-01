@@ -1,0 +1,53 @@
+# --- Local data: sqlite db + generated audio + model downloads ---
+data/
+*.db
+*.sqlite
+*.sqlite3
+
+# --- Generated / large media & model weights (belt-and-suspenders) ---
+*.wav
+*.mp3
+*.flac
+*.m4a
+*.ogg
+*.ckpt
+*.safetensors
+*.pt
+*.pth
+*.bin
+*.onnx
+*.gguf
+
+# --- Python ---
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ipynb_checkpoints/
+.venv/
+venv/
+.venv-acestep/
+.venv-kokoro/
+.venv-omnivoice/
+.venv-musicgen/
+
+# --- Secrets / env ---
+.env
+.env.*
+*.key
+secrets.*
+
+# --- Local tooling / caches ---
+.claude/
+.cache/
+hf_cache/
+models/
+
+# --- Editor / OS ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
