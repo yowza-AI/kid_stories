@@ -108,10 +108,12 @@ def init_db() -> None:
                 character_id   INTEGER REFERENCES characters(id),  -- resolved saved char, if any
                 emotion        TEXT,                       -- delivery emotion for this line
                 text           TEXT NOT NULL,              -- the spoken line
+                voice_mode     TEXT NOT NULL DEFAULT 'preset',  -- 'clone'|'design'|'preset'
                 speaker        TEXT,                       -- resolved Qwen preset speaker
                 voice_instruct TEXT,                       -- instruct string fed to Qwen TTS
-                audio_path     TEXT,                       -- per-line clip
-                status         TEXT NOT NULL DEFAULT 'pending'
+                audio_path     TEXT,                       -- per-line clip (merged narrator
+                                                           -- lines share one clip)
+                status         TEXT NOT NULL DEFAULT 'pending'  -- pending|done|silent
             );
             CREATE INDEX IF NOT EXISTS idx_story_lines_story
                 ON story_lines (story_id, seq);
@@ -127,6 +129,9 @@ def init_db() -> None:
         _ensure_columns(c, "stories", {
             "rating": "rating TEXT NOT NULL DEFAULT 'G'",
             "genre": "genre TEXT NOT NULL DEFAULT 'Fluffy'",
+        })
+        _ensure_columns(c, "story_lines", {
+            "voice_mode": "voice_mode TEXT NOT NULL DEFAULT 'preset'",
         })
 
 
@@ -258,6 +263,26 @@ def set_story_error(story_id: int, message: str) -> None:
         )
 
 
+def get_unfinished_stories() -> list:
+    """Stories that never reached a terminal state (for startup recovery)."""
+    with _connect() as c:
+        rows = c.execute(
+            "SELECT id, status FROM stories WHERE status NOT IN ('ready', 'error')"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def reset_story_for_retry(story_id: int) -> None:
+    """Put an errored story back in the queue state so it can be rebuilt."""
+    with _connect() as c:
+        c.execute(
+            """UPDATE stories
+               SET status = 'queued', stage = 'Queued', progress = 0, error = NULL
+               WHERE id = ?""",
+            (story_id,),
+        )
+
+
 def _story_to_dict(row) -> dict:
     d = dict(row)
     d["themes"] = json.loads(d.get("themes") or "[]")
@@ -320,8 +345,8 @@ def replace_story_lines(story_id: int, lines: list) -> None:
         c.executemany(
             """INSERT INTO story_lines
                (story_id, seq, character_name, character_id, emotion, text,
-                speaker, voice_instruct, audio_path, status)
-               VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                voice_mode, speaker, voice_instruct, audio_path, status)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
             [
                 (
                     story_id, i,
@@ -329,6 +354,7 @@ def replace_story_lines(story_id: int, lines: list) -> None:
                     ln.get("character_id"),
                     ln.get("emotion"),
                     ln.get("text") or "",
+                    ln.get("voice_mode") or "preset",
                     ln.get("speaker"),
                     ln.get("voice_instruct"),
                     ln.get("audio_path"),

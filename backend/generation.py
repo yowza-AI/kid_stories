@@ -9,20 +9,31 @@ Writers' room (all local via Ollama), then narration:
                 violence, scares) and overall quality. Can send back once.
   4. SCRIPTIFY- converts the approved story into a playwright script:
                 an ordered list of {character, emotion, line} (incl. Narrator).
-  5. NARRATE  - per line: resolve the character's voice + an emotion-driven
-                "instruct", synthesize a clip, then concatenate clips in order.
+  5. NARRATE  - the validated recipe (PLAN.md §1b, kid-approved 2026-06-27):
+                * Narrator lines are merged into smooth clips and voiced by
+                  CLONING the gravelly reference clip (Base model) — steady,
+                  reproducible, every story.
+                * Character lines stay solo and are voiced per line with
+                  VoiceDesign (voice_description + emotion as free text) —
+                  emotion beats timbre consistency for expressive characters.
+                * Explicit user-picked presets (and fallbacks) use CustomVoice.
+                Clips render batched by sub-model (one fits in VRAM at a time),
+                then concatenate in story order with short gaps.
 
-Story TEXT is fully real (local LLM). Story AUDIO is currently a PLACEHOLDER:
-each line becomes a short silent clip and clips are concatenated, so the whole
-per-line pipeline (voice resolution, ordering, concatenation) is exercised. Real
-narration swaps `_synthesize_line` for a Qwen3-TTS call in the next phase — the
-resolved `speaker` + `voice_instruct` per line are exactly what Qwen needs.
+Jobs run on a SINGLE background worker (queue) — the LLM and the TTS GPU can't
+take concurrent builds. If TTS is unavailable, clips fall back to silence and
+the line is marked 'silent' (not 'done') so failures are visible and re-renderable.
 """
 import json
 import os
+import queue
 import re
 import threading
 import wave
+
+# stdlib audio resampling; deprecated upstream (removed in Python 3.13) but the
+# project pins Python 3.12. Replace with numpy/soundfile if we move past 3.12.
+import audioop
 
 import requests
 
@@ -426,8 +437,12 @@ def _summarize(draft: str, fallback_title: str) -> tuple:
 
 # --------------------------- voice resolution ----------------------------- #
 def _auto_speaker(name: str) -> str:
-    """Deterministic preset for an unsaved character (same name -> same voice)."""
-    names = [s["name"] for s in config.PRESET_SPEAKERS]
+    """Deterministic preset for an unsaved character (same name -> same voice).
+
+    English presets only — a non-English preset reading English sounds strongly
+    accented (the failure the kids panned).
+    """
+    names = config.ENGLISH_PRESETS
     h = sum(ord(c) for c in (name or "x").lower())
     return names[h % len(names)]
 
@@ -457,24 +472,60 @@ def _pick_speaker_for_voice(voice_description: str, gender: str) -> str:
     return "Aiden"  # clear, sunny English male default
 
 
-def _resolve_voice(character_name: str, saved_by_name: dict) -> tuple:
-    """Return (character_id, speaker, instruct_base) for a script character."""
-    key = (character_name or "").strip().lower()
-    ch = saved_by_name.get(key)
-    if ch:
-        return ch.get("id"), (ch.get("speaker") or config.NARRATOR_SPEAKER)
-    if key in ("narrator", "the narrator", ""):
-        return None, config.NARRATOR_SPEAKER
-    return None, _auto_speaker(character_name)
-
-
 def _voice_instruct(emotion: str) -> str:
+    """Instruct for CustomVoice preset lines (mild emotion nudge)."""
     emotion = (emotion or "warm").strip()
     return f"Speak in a {emotion}, gentle and soothing bedtime tone."
 
 
-# ------------------------------ TTS (stub) -------------------------------- #
-def _write_silence(path: str, seconds: float, rate: int = 22050) -> None:
+def _design_instruct(voice_description: str, emotion: str) -> str:
+    """Instruct for VoiceDesign lines — describing the character AND the
+    emotion in free text is what sold the emotion in the A/B/C bake-off."""
+    desc = (voice_description or "a warm, friendly character voice").strip().rstrip(".")
+    emotion = (emotion or "warm").strip()
+    return f"{desc}, speaking in a {emotion} voice, vivid and expressive."
+
+
+def _narrator_clone_ready() -> bool:
+    return bool(config.NARRATOR_REF_AUDIO) and os.path.exists(config.NARRATOR_REF_AUDIO)
+
+
+def _line_voice(character_name: str, emotion: str, saved_by_name: dict) -> dict:
+    """Resolve how one script line is voiced (the validated recipe, PLAN §1b).
+
+    Narrator          -> clone of the gravelly reference clip (reproducible);
+                         preset fallback if the clip is missing.
+    Saved char, clone -> clone of the character's own reference clip.
+    Saved char with a voice_description -> per-line VoiceDesign (best emotion).
+    Saved char with an explicit preset  -> CustomVoice (honors the user's pick).
+    Unknown char      -> deterministic English preset.
+    """
+    key = (character_name or "").strip().lower()
+    if key in ("", "narrator", "the narrator"):
+        mode = "clone" if _narrator_clone_ready() else "preset"
+        return {"character_id": None, "voice_mode": mode,
+                "speaker": config.NARRATOR_SPEAKER,
+                "voice_instruct": _voice_instruct(emotion)}
+    ch = saved_by_name.get(key)
+    if ch:
+        if ch.get("voice_mode") == "clone" and ch.get("ref_audio_path"):
+            return {"character_id": ch.get("id"), "voice_mode": "clone",
+                    "speaker": ch.get("speaker") or config.NARRATOR_SPEAKER,
+                    "voice_instruct": _voice_instruct(emotion)}
+        if ch.get("voice_description"):
+            return {"character_id": ch.get("id"), "voice_mode": "design",
+                    "speaker": ch.get("speaker"),  # kept for fallback only
+                    "voice_instruct": _design_instruct(ch["voice_description"], emotion)}
+        return {"character_id": ch.get("id"), "voice_mode": "preset",
+                "speaker": ch.get("speaker") or _auto_speaker(character_name),
+                "voice_instruct": _voice_instruct(emotion)}
+    return {"character_id": None, "voice_mode": "preset",
+            "speaker": _auto_speaker(character_name),
+            "voice_instruct": _voice_instruct(emotion)}
+
+
+# ------------------------------ rendering --------------------------------- #
+def _write_silence(path: str, seconds: float, rate: int = 24000) -> None:
     frames = max(1, int(seconds * rate))
     with wave.open(path, "w") as w:
         w.setnchannels(1)
@@ -483,42 +534,120 @@ def _write_silence(path: str, seconds: float, rate: int = 22050) -> None:
         w.writeframes(b"\x00\x00" * frames)
 
 
-def _synthesize_line(line: dict, out_path: str) -> None:
-    """Narrate one line with Qwen3-TTS; fall back to a silent clip if TTS is off."""
-    text = (line.get("text") or "").strip()
+def _merge_render_groups(stored: list, max_chars: int = None) -> list:
+    """Group script lines into render clips.
+
+    Consecutive NARRATOR lines merge into one clip (soft char cap) for smooth
+    narration; each character line stays solo so it keeps its own per-line
+    emotion instruct. Returns groups in story order.
+    """
+    if max_chars is None:
+        max_chars = config.NARRATOR_MERGE_CHARS
+    groups = []
+    cur = None  # the open narrator group, if the previous line was narration
+    for ln in stored:
+        text = (ln.get("text") or "").strip()
+        if not text:
+            continue
+        is_narr = (ln.get("character_name") or "").strip().lower() in (
+            "", "narrator", "the narrator")
+        if is_narr and cur is not None and len(cur["text"]) + 1 + len(text) <= max_chars:
+            cur["text"] += " " + text
+            cur["line_ids"].append(ln["id"])
+            continue
+        g = {
+            "seq": ln["seq"],
+            "line_ids": [ln["id"]],
+            "text": text,
+            "voice_mode": ln.get("voice_mode") or "preset",
+            "speaker": ln.get("speaker"),
+            "voice_instruct": ln.get("voice_instruct"),
+            "character_id": ln.get("character_id"),
+            "emotion": ln.get("emotion"),
+        }
+        groups.append(g)
+        cur = g if is_narr else None
+    return groups
+
+
+def _clone_ref(group: dict, chars_by_id: dict) -> tuple:
+    """Reference clip + transcript for a clone-mode group."""
+    ch = chars_by_id.get(group.get("character_id"))
+    if ch and ch.get("ref_audio_path"):
+        return ch["ref_audio_path"], ch.get("ref_text") or ""
+    return config.NARRATOR_REF_AUDIO, config.NARRATOR_REF_TEXT
+
+
+def _render_group(group: dict, chars_by_id: dict, out_path: str) -> str:
+    """Render one clip; returns its line status: 'done' or 'silent'.
+
+    'silent' means the clip is a placeholder (TTS off or synth failed) — kept
+    distinct from 'done' so failed lines are visible and re-renderable.
+    """
+    text = group["text"]
     if text and tts.available():
         try:
-            tts.synthesize(
-                text=text,
-                speaker=line.get("speaker"),
-                instruct=line.get("voice_instruct"),
-                out_path=out_path,
-                language=config.TTS_LANGUAGE,
-            )
-            return
-        except Exception as e:  # noqa: BLE001 - one bad line shouldn't kill the story
-            print(f"[tts] line synth failed, using silence: {e}", flush=True)
+            mode = group.get("voice_mode") or "preset"
+            if mode == "clone":
+                ref_audio, ref_text = _clone_ref(group, chars_by_id)
+                if ref_audio and os.path.exists(ref_audio):
+                    tts.synthesize_clone(text, ref_audio, ref_text, out_path)
+                    return "done"
+                mode = "preset"  # reference clip went missing
+            if mode == "design":
+                tts.synthesize_design(text, group.get("voice_instruct"), out_path)
+                return "done"
+            tts.synthesize_custom(
+                text, group.get("speaker") or config.NARRATOR_SPEAKER,
+                group.get("voice_instruct"), out_path)
+            return "done"
+        except Exception as e:  # noqa: BLE001 - one bad clip shouldn't kill the story
+            print(f"[tts] clip synth failed, using silence: {e}", flush=True)
     # Fallback: silent clip sized to read time (match model sample rate if known).
     words = len(text.split())
     seconds = max(0.6, words * 0.38) + 0.3
-    _write_silence(out_path, seconds, rate=tts.sample_rate() or 22050)
+    _write_silence(out_path, seconds, rate=tts.sample_rate() or 24000)
+    return "silent"
 
 
-def _concat_wavs(paths: list, out_path: str) -> None:
-    params = None
-    data = b""
+def _concat_wavs(paths: list, out_path: str, gap_seconds: float = None) -> None:
+    """Join clips in story order with a short gap between them.
+
+    Clips can arrive with different sample rates (e.g. silent fallbacks written
+    before the model's rate is known vs. real 24 kHz TTS clips) — everything is
+    converted to the first clip's rate/format so the output never plays
+    speed-shifted.
+    """
+    if gap_seconds is None:
+        gap_seconds = config.TTS_GAP_SECONDS
+    clips = []
     for p in paths:
         if not p or not os.path.exists(p):
             continue
         with wave.open(p, "rb") as w:
-            params = w.getparams()
-            data += w.readframes(w.getnframes())
-    if params is None:
+            clips.append((w.getframerate(), w.getnchannels(), w.getsampwidth(),
+                          w.readframes(w.getnframes())))
+    if not clips:
         _write_silence(out_path, 1.0)
         return
+    rate = clips[0][0]
+    gap = b"\x00\x00" * int(gap_seconds * rate)
+    data = bytearray()
+    for i, (r, ch, sw, frames) in enumerate(clips):
+        if ch == 2:
+            frames = audioop.tomono(frames, sw, 0.5, 0.5)
+        if sw != 2:
+            frames = audioop.lin2lin(frames, sw, 2)
+        if r != rate:
+            frames, _ = audioop.ratecv(frames, 2, 1, r, rate, None)
+        if i:
+            data += gap
+        data += frames
     with wave.open(out_path, "wb") as w:
-        w.setparams(params)
-        w.writeframes(data)
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(bytes(data))
 
 
 # ------------------------------- job runner ------------------------------- #
@@ -572,7 +701,7 @@ def _run_job(story_id: int) -> None:
                 feedback="MANAGER (final authority) requires: " + verdict["feedback"],
             )
 
-        # 4) Casting: design any NEW characters the story introduced, then store them
+        # 5) Casting: design any NEW characters the story introduced, then store them
         db.update_story_progress(story_id, "casting", "Casting & designing new characters…", 50)
         global_chars = db.list_characters()
         saved_by_name = {(c["name"] or "").strip().lower(): c for c in global_chars}
@@ -594,7 +723,20 @@ def _run_job(story_id: int) -> None:
             if created:
                 saved_by_name[cname.lower()] = created
 
-        # 5) Scriptify into a playwright script
+        # The child hero speaks too: give them a designed voice (never a
+        # random preset) unless a saved character already shares the name.
+        if subject and subject.get("name"):
+            skey = subject["name"].strip().lower()
+            if skey and skey not in saved_by_name:
+                age = subject.get("age")
+                saved_by_name[skey] = {
+                    "id": None,
+                    "voice_description": (
+                        f"a bright, warm child's voice, about {age} years old"
+                        if age else "a bright, warm child's voice"),
+                }
+
+        # 6) Scriptify into a playwright script
         db.update_story_progress(story_id, "scripting", "Formatting the script…", 56)
         raw_lines = _scriptify(draft)
 
@@ -604,17 +746,18 @@ def _run_job(story_id: int) -> None:
             if not isinstance(ln, dict):
                 continue
             cname = (ln.get("character") or "Narrator").strip()
-            cid, speaker = _resolve_voice(cname, saved_by_name)
+            text = (ln.get("text") or "").strip()
+            if not text:
+                continue
+            emotion = (ln.get("emotion") or "warm").strip()
+            voice = _line_voice(cname, emotion, saved_by_name)
             lines.append({
                 "character_name": cname,
-                "character_id": cid,
-                "emotion": (ln.get("emotion") or "warm").strip(),
-                "text": (ln.get("text") or "").strip(),
-                "speaker": speaker,
-                "voice_instruct": _voice_instruct(ln.get("emotion")),
+                "emotion": emotion,
+                "text": text,
                 "status": "pending",
+                **voice,
             })
-        lines = [ln for ln in lines if ln["text"]]
         db.replace_story_lines(story_id, lines)
         # Link every character that actually appears (selected, reused, or new).
         resolved_ids = {ln["character_id"] for ln in lines if ln.get("character_id")}
@@ -625,28 +768,35 @@ def _run_job(story_id: int) -> None:
             draft, f"A Story for {subject['name']}" if subject else "A Bedtime Story"
         )
 
-        # 6) Narrate each line, then concatenate in order.
+        # 7) Narrate: merge narrator runs into clips, render batched by
+        #    sub-model (only one fits in VRAM at a time), concat in story order.
         db.update_story_progress(story_id, "narrating", "Recording narration…", 60)
         clip_dir = os.path.join(config.AUDIO_DIR, f"story_{story_id}")
         os.makedirs(clip_dir, exist_ok=True)
         stored = db.get_story_lines(story_id)
-        clip_paths = []
-        total = len(stored) or 1
-        for idx, ln in enumerate(stored):
-            clip_path = os.path.join(clip_dir, f"line_{ln['seq']:04d}.wav")
-            _synthesize_line(ln, clip_path)
-            db.set_line_audio(ln["id"], clip_path, "done")
-            clip_paths.append(clip_path)
+        chars_by_id = {c["id"]: c for c in db.list_characters()}
+        groups = _merge_render_groups(stored)
+        for g in groups:
+            g["clip_path"] = os.path.join(clip_dir, f"clip_{g['seq']:04d}.wav")
+        model_order = {"clone": 0, "design": 1, "preset": 2}
+        total = len(groups) or 1
+        render_order = sorted(
+            groups, key=lambda g: (model_order.get(g["voice_mode"], 3), g["seq"]))
+        for n, g in enumerate(render_order):
+            line_status = _render_group(g, chars_by_id, g["clip_path"])
+            for lid in g["line_ids"]:
+                db.set_line_audio(lid, g["clip_path"], line_status)
             db.update_story_progress(
                 story_id, "narrating",
-                f"Voicing line {idx + 1} of {total}…",
-                60 + int(32 * (idx + 1) / total),
+                f"Voicing clip {n + 1} of {total}…",
+                60 + int(32 * (n + 1) / total),
             )
+        tts.unload()  # free VRAM between stories
 
         final_audio = os.path.join(config.AUDIO_DIR, f"story_{story_id}.wav")
-        _concat_wavs(clip_paths, final_audio)
+        _concat_wavs([g["clip_path"] for g in groups], final_audio)
 
-        # 7) Done
+        # 8) Done
         db.set_story_result(story_id, title, draft, summary, final_audio)
 
     except requests.exceptions.RequestException as e:
@@ -661,6 +811,38 @@ def _run_job(story_id: int) -> None:
         db.set_story_error(story_id, f"{type(e).__name__}: {e} | {tb}")
 
 
+# One background worker renders jobs sequentially — the local LLM and the TTS
+# GPU can't take concurrent builds (this is the generate-ahead queue, locally).
+_job_queue: "queue.Queue[int]" = queue.Queue()
+_worker_lock = threading.Lock()
+_worker = None
+
+
+def _worker_loop() -> None:
+    while True:
+        story_id = _job_queue.get()
+        try:
+            _run_job(story_id)  # catches its own exceptions -> story error state
+        finally:
+            _job_queue.task_done()
+
+
 def start_story_job(story_id: int) -> None:
-    """Kick off generation in a daemon thread and return immediately."""
-    threading.Thread(target=_run_job, args=(story_id,), daemon=True).start()
+    """Enqueue generation and return immediately (single worker, FIFO)."""
+    global _worker
+    with _worker_lock:
+        if _worker is None or not _worker.is_alive():
+            _worker = threading.Thread(target=_worker_loop, daemon=True)
+            _worker.start()
+    _job_queue.put(story_id)
+
+
+def recover_interrupted() -> None:
+    """Startup sweep: requeue stories that never started; fail the ones that
+    were mid-flight when the server died (their partial state is unusable)."""
+    for s in db.get_unfinished_stories():
+        if s["status"] == "queued":
+            start_story_job(s["id"])
+        else:
+            db.set_story_error(
+                s["id"], "Interrupted by a server restart — press Retry to rebuild.")

@@ -51,13 +51,36 @@ MAX_QA_ROUNDS = int(os.environ.get("MAX_QA_ROUNDS", "2"))
 NARRATOR_SPEAKER = os.environ.get("NARRATOR_SPEAKER", "Aiden")
 
 # --- Qwen3-TTS narration ---
+# Three sub-models, each with different powers (see PLAN.md §1b):
+#   CustomVoice  - 9 fixed preset speakers (reproducible, mild emotion via instruct)
+#   VoiceDesign  - free-text voice+emotion description (best emotion, NOT reproducible)
+#   Base         - voice clone from a reference clip (reproducible, no emotion knob)
+# Only one fits in VRAM at a time on an 8 GB card; tts.py swaps them sequentially.
 TTS_MODEL = os.environ.get("TTS_MODEL", "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice")
+TTS_MODEL_DESIGN = os.environ.get("TTS_MODEL_DESIGN", "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign")
+TTS_MODEL_BASE = os.environ.get("TTS_MODEL_BASE", "Qwen/Qwen3-TTS-12Hz-1.7B-Base")
 # "" = auto-pick: GPU 1 if there are 2+ cards (keeps GPU 0 free for Ollama),
 # else GPU 0, else CPU. Override with e.g. TTS_DEVICE=cuda:0.
 TTS_DEVICE = os.environ.get("TTS_DEVICE", "")
 TTS_LANGUAGE = os.environ.get("TTS_LANGUAGE", "English")
 # Set TTS_DISABLED=1 to force the silent placeholder (e.g. before the model is set up).
 TTS_DISABLED = os.environ.get("TTS_DISABLED", "") == "1"
+
+# --- The validated narration recipe (PLAN.md §1b, kid-approved 2026-06-27) ---
+# Narrator = gravelly voice CLONED via the Base model from this reference clip.
+# The clip was made once with VoiceDesign; the clone reproduces it exactly every
+# story. If the clip is missing, narration falls back to the CustomVoice preset.
+NARRATOR_REF_AUDIO = os.environ.get(
+    "NARRATOR_REF_AUDIO", os.path.join(DATA_DIR, "vd_british_gravelly.wav"))
+NARRATOR_REF_TEXT = os.environ.get(
+    "NARRATOR_REF_TEXT",
+    "And here, beneath the silver moon, a tiny dragon settles down, gently, "
+    "into a peaceful sleep.")
+# Merge consecutive narrator lines into one clip up to this soft char cap
+# (smooth narration, fewer clips); character lines stay solo (per-line emotion).
+NARRATOR_MERGE_CHARS = int(os.environ.get("NARRATOR_MERGE_CHARS", "380"))
+# Silence inserted between clips when concatenating the final audio.
+TTS_GAP_SECONDS = float(os.environ.get("TTS_GAP_SECONDS", "0.28"))
 
 # --- Qwen3-TTS preset speakers (verified from the CustomVoice model card) ---
 # A character pinned to a fixed preset speaker sounds the SAME every appearance
@@ -83,3 +106,8 @@ PRESET_SPEAKERS = [
     {"name": "Sohee", "native": "Korean", "gender": "female",
      "desc": "Warm Korean female, rich emotion", "recommended": False},
 ]
+
+# Presets that speak unaccented English. Auto-assigned voices must come from
+# this list — a non-English preset reading English sounds strongly accented
+# (the exact failure the kids panned). Others remain user-selectable.
+ENGLISH_PRESETS = [s["name"] for s in PRESET_SPEAKERS if s["native"] == "English"]
