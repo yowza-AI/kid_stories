@@ -9,6 +9,7 @@ import sys
 # Make sibling modules importable no matter the working directory.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from contextlib import asynccontextmanager
 from typing import List, Optional
 
 import uvicorn
@@ -20,13 +21,18 @@ from pydantic import BaseModel
 import config
 import db
 import generation
+import tts
 
-app = FastAPI(title="AI Storyteller (local MVP)")
 
-
-@app.on_event("startup")
-def _startup() -> None:
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
     db.init_db()
+    # Requeue never-started stories; error out ones interrupted mid-generation.
+    generation.recover_interrupted()
+    yield
+
+
+app = FastAPI(title="AI Storyteller (local MVP)", lifespan=_lifespan)
 
 
 # ------------------------------- schemas ---------------------------------- #
@@ -56,6 +62,12 @@ class StoryIn(BaseModel):
 @app.get("/api/voices")
 def get_voices():
     return config.PRESET_SPEAKERS
+
+
+@app.get("/api/tts/status")
+def get_tts_status():
+    """Why narration is (or isn't) real audio right now — saves debugging time."""
+    return tts.status()
 
 
 @app.get("/api/characters")
@@ -104,6 +116,19 @@ def get_story(story_id: int):
     if not story:
         raise HTTPException(404, "story not found")
     return story
+
+
+@app.post("/api/stories/{story_id}/retry")
+def retry_story(story_id: int):
+    """Rebuild a story that ended in error (e.g. interrupted by a restart)."""
+    story = db.get_story(story_id)
+    if not story:
+        raise HTTPException(404, "story not found")
+    if story["status"] != "error":
+        raise HTTPException(409, "story is not in an error state")
+    db.reset_story_for_retry(story_id)
+    generation.start_story_job(story_id)
+    return {"id": story_id, "status": "queued"}
 
 
 @app.get("/api/stories/{story_id}/status")

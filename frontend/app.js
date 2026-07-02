@@ -16,6 +16,7 @@ async function init() {
     populateVoiceSelect();
     await loadCharacters();
     await loadLibrary();
+    await loadTtsStatus();
   } catch (e) {
     console.error(e);
   }
@@ -26,6 +27,21 @@ async function init() {
     s.classList.toggle("hidden");
     $("toggleScript").textContent = s.classList.contains("hidden") ? "Show script" : "Hide script";
   });
+}
+
+async function loadTtsStatus() {
+  const note = document.querySelector(".placeholder-note");
+  if (!note) return;
+  try {
+    const s = await api("/api/tts/status");
+    if (s.disabled) {
+      note.textContent = "🔇 TTS is disabled (TTS_DISABLED=1) — stories get silent placeholder audio.";
+    } else if (!s.available) {
+      note.textContent = "🔇 TTS unavailable — narration will be silent. " + (s.error || "Run setup-tts.bat.");
+    } else {
+      note.textContent = "🔊 Narration uses local Qwen3-TTS (cloned narrator + designed character voices).";
+    }
+  } catch (e) { /* leave the static note */ }
 }
 
 function populateVoiceSelect() {
@@ -191,6 +207,28 @@ async function loadLibrary() {
       `<div class="t">${escapeHtml(s.title || "(untitled)")} ${badge}</div>` +
       `<div class="s">${escapeHtml(s.subject_name || "")}${s.summary ? " · " + escapeHtml(s.summary) : ""}</div>`;
     if (s.status === "ready") item.addEventListener("click", () => showStory(s.id));
+    if (s.status === "error") {
+      const btn = document.createElement("button");
+      btn.className = "secondary retry";
+      btn.type = "button";
+      btn.textContent = "↻ Retry";
+      btn.addEventListener("click", async (ev) => {
+        ev.stopPropagation();
+        btn.disabled = true;
+        try {
+          await api(`/api/stories/${s.id}/retry`, { method: "POST" });
+          $("noStory").classList.add("hidden");
+          $("player").classList.add("hidden");
+          $("readiness").classList.remove("hidden");
+          setProgress(2, "Queued…");
+          pollStatus(s.id);
+          await loadLibrary();
+        } catch (e) {
+          btn.disabled = false;
+        }
+      });
+      item.appendChild(btn);
+    }
     lib.appendChild(item);
   });
 }

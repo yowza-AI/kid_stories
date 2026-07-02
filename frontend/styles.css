@@ -122,5 +122,6 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .badge.ready { background: #14422e; color: var(--ok); }
 .badge.error { background: #4a1f1f; color: var(--err); }
 .badge.working { background: #2a2c5a; color: var(--accent); }
+.lib-item .retry { margin-top: 8px; padding: 6px 12px; font-size: 0.82rem; }
 
 .hidden { display: none; }
