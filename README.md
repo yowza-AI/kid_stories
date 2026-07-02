@@ -21,14 +21,25 @@ Personalized bedtime stories for kids, written by a small crew of AI agents and
 - **Playwright script**: the approved story is split into ordered lines, each with
   a **character, emotion, and resolved voice** (saved characters keep the same
   voice every story).
-- **Per-line narration + concatenation**: each line becomes a clip, clips are
-  joined in order into one audio file.
-- **Library**: past stories with summaries (fed back in for continuity).
-
-- **Real narration** via local **Qwen3-TTS 1.7B** (after one-time setup, below):
-  each line is voiced with its character's speaker + emotion, then clips are
-  concatenated. Without the model installed, narration falls back to silent clips
-  so the app still runs.
+- **Narration = the validated recipe** (PLAN.md §1b, kid-approved 2026-06-27):
+  - **Narrator**: consecutive narrator lines are merged into smooth clips and
+    voiced by **cloning** the gravelly reference clip
+    (`data/vd_british_gravelly.wav`, tracked in git) with the **Base** model —
+    reproducible, every story.
+  - **Characters**: each line is voiced with **VoiceDesign** from the
+    character's `voice_description` + the line's emotion — best emotion, slight
+    timbre drift accepted.
+  - **Explicit presets** (characters you created and pinned to a preset voice)
+    use **CustomVoice**. Auto-assigned presets are English-only (Aiden/Ryan).
+  - Clips render batched by sub-model (only one fits in 8 GB VRAM at a time),
+    then concatenate in story order with ~0.28 s gaps. Without the models
+    installed, narration falls back to silent clips (lines marked `silent`,
+    not `done`) so the app still runs.
+- **Library**: past stories with summaries (fed back in for continuity); errored
+  stories show a **Retry** button.
+- **Job queue**: one background worker builds stories FIFO (the LLM and TTS GPU
+  can't take concurrent builds). On startup, never-started stories are requeued
+  and interrupted ones are marked as errors (retryable).
 
 ## Requirements
 
@@ -52,18 +63,25 @@ Then open <http://localhost:8000>. (Or manually: `py -m pip install -r requireme
 | `OLLAMA_MODEL` | `qwen2.5:7b-instruct` | story-writing model |
 | `STORY_TARGET_WORDS` | `1500` | ~5 min read |
 | `MAX_QA_ROUNDS` | `2` | writer↔QA revision rounds |
-| `NARRATOR_SPEAKER` | `Aiden` | default narration voice |
+| `NARRATOR_SPEAKER` | `Aiden` | preset fallback narrator voice |
+| `NARRATOR_REF_AUDIO` | `data/vd_british_gravelly.wav` | narrator clone reference clip |
+| `NARRATOR_REF_TEXT` | (its transcript) | reference transcript for cloning |
+| `NARRATOR_MERGE_CHARS` | `380` | soft cap when merging narrator lines into one clip |
+| `TTS_GAP_SECONDS` | `0.28` | silence between clips in the final audio |
+| `TTS_MODEL` / `TTS_MODEL_DESIGN` / `TTS_MODEL_BASE` | Qwen3-TTS 1.7B trio | CustomVoice / VoiceDesign / Base model IDs |
 
 ## Layout
 
 ```
 backend/
-  config.py      paths, model, preset speakers
+  config.py      paths, models, preset speakers, narration recipe knobs
   db.py          SQLite schema + data access
-  generation.py  writers' room + scriptify + per-line narration (job runner)
+  generation.py  writers' room + scriptify + recipe renderer (queued job runner)
   main.py        FastAPI API + static GUI server
+  tts.py         Qwen3-TTS manager (CustomVoice / VoiceDesign / Base, swapped in VRAM)
 frontend/        index.html, styles.css, app.js
-data/            sqlite db + audio (gitignored, created on first run)
+tests/           unit tests — run: py -m unittest discover -s tests
+data/            sqlite db + audio (gitignored except the narrator reference clip)
 ```
 
 ## Data model (key tables)
@@ -84,14 +102,13 @@ One-time install of PyTorch (CUDA), `qwen-tts`, and `soundfile`:
 setup-tts.bat
 ```
 
-The first story generated afterward downloads the ~4.5 GB model (cached). It loads
-**FP16** on **GPU 1** automatically (`backend/tts.py`), leaving GPU 0 for Ollama.
+The first story generated afterward downloads the models it needs (~4.5 GB each,
+cached): **Base** (narrator clone), **VoiceDesign** (characters), and
+**CustomVoice** (explicit presets). They load **FP16** on **GPU 1** automatically
+(`backend/tts.py`), one at a time (8 GB card), leaving GPU 0 for Ollama.
 
 Turing notes (RTX 2080 = sm75): we use `dtype=float16` (no BF16) and
 `attn_implementation="sdpa"` (FlashAttention 2 needs Ampere+); do **not** install
 flash-attn. Override placement with `TTS_DEVICE=cuda:0`; force the silent
-placeholder with `TTS_DISABLED=1`.
-
-Voices: characters map to Qwen's 9 presets. For a warm *female English* narrator,
-use voice **cloning** (no English-female preset exists) — the `clone` voice fields
-are already in the schema (future wiring).
+placeholder with `TTS_DISABLED=1`. Check `/api/tts/status` to see why narration
+is (or isn't) real audio.

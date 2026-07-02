@@ -57,7 +57,11 @@ Qwen3-TTS ships **three sub-models**, each with different powers:
 - Need **consistency** (a recurring narrator/character) → **design once, then Base-clone** that clip.
   (The clone is reproducible but flatter — no emotion knob.)
 
-**Render mechanics** (see `scratchpad/render_frontier_v2.py` — the validated script):
+**Render mechanics** — **productized 2026-07-02**: this recipe now lives in the
+app (`backend/tts.py` sub-model manager + `backend/generation.py` renderer; the
+original `scratchpad/render_frontier_v2.py` was lost — scratchpads are ephemeral,
+which is why the recipe was moved into tracked code). The reference clip
+`data/vd_british_gravelly.wav` is now tracked in git. Steps as implemented:
 1. Build the line list (`role = N` narrator, else character + emotion).
 2. Merge consecutive **narrator** lines into clips (soft cap ~380 chars) for smooth narration;
    each **character** line stays solo (preserves its per-line emotion instruct).
@@ -73,8 +77,9 @@ Qwen3-TTS ships **three sub-models**, each with different powers:
 - Only **Aiden** and **Ryan** are native-English CustomVoice presets (both male). Female/other
   presets are non-English-native → accented English. (VoiceDesign sidesteps this — describe the voice.)
 - Character voice **drift** between lines (the VoiceDesign trade-off).
-- Useful test scripts in `scratchpad/`: `render_frontier_v2.py` (recipe), `character_emotion_test.py`
-  (A/B/C bake-off), `render_clone.py`, `zonos_test.py`.
+- The old `scratchpad/` test scripts (`render_frontier_v2.py`, `character_emotion_test.py`,
+  `render_clone.py`, `zonos_test.py`) are GONE (ephemeral scratchpad). Their findings are
+  captured above; the render recipe itself is now tracked code (see HANDOFF.md 2026-07-02).
 
 ### 1c. Other voice models tried (for the record)
 - **OmniVoice** (Apache): real British accent + runs great on the 2080 (~2 GB, ~2 s/clip) but
