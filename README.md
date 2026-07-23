@@ -1,7 +1,7 @@
 # AI Storyteller — local MVP
 
 Personalized bedtime stories for kids, written by a small crew of AI agents and
-(eventually) read aloud with consistent per-character AI voices.
+read aloud with consistent per-character AI voices.
 
 ## What works today
 
