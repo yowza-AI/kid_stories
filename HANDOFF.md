@@ -2,6 +2,44 @@
 
 Terse trail of behavior changes: what changed, why, gotchas. Newest first.
 
+## 2026-08-07 — First multi-night arc, written outside the app (PLAN §3 / §8 dry run)
+
+**What changed**
+
+- **`content/arcs/phillip-dragonhall/` — a 7-session arc, text only.** *The Ledger of
+  Ninefold*: Phillip Vane, 15, high fantasy, PG-13. ~15.5k words of prose plus a
+  Story Bible and a chapter map. Voices deliberately deferred.
+- **Built by a Claude multi-agent workflow, NOT by `backend/generation.py`.** Stages:
+  Story Bible → chapter map → 7 chapter writers in parallel → hostile continuity
+  audit → revision. The app's Ollama pipeline was not involved at any point.
+- **`content/` is a new TRACKED directory.** Written deliverables must not go in
+  `data/` — it is gitignored (see the lost-scratchpad entry below; same failure mode).
+- **PLAN §3's architecture is validated in practice.** The Story Bible + a chapter map
+  carrying an explicit per-session **end-state** is what let 7 writers run in
+  PARALLEL and still chain: session N's end-state is session N+1's opening
+  condition, which does the job a sequential running summary would. This is the
+  design to port into the app for the multi-night feature (PLAN §8).
+- **The audit stage earns its keep**: 23 defects across 7 chapters (2 blocking,
+  10 major, 11 minor) — parallel writers really do contradict each other. All
+  blocking/major fixed by revisers; the mechanical minors fixed by hand after.
+
+**Gotchas**
+
+- The arc is written to the conventions `_scriptify` expects (named speakers,
+  ~⅔ narration, no headings/markdown inside the prose), so the voice pass should
+  consume it without a rewrite. Untested — no TTS has been run against it.
+- **The app cannot produce this today.** There is no Claude/frontier backend in
+  `backend/generation.py` (`config.OLLAMA_MODEL` is the only text backend), and no
+  schema for series/chapters — `stories` has no arc or sequence column. This arc
+  lives only as markdown on disk; it is not in the DB.
+- A reviser told to fix a seam by editing a NEIGHBOURING chapter can't — each
+  reviser is scoped to its own file. The ch3 seam was closed from the ch3 side
+  instead. Fine here, but cross-file fixes need a different stage shape.
+- Three audit findings were left unapplied on purpose because they add new
+  material rather than fix a contradiction (Odd's sponsorship payoff, a daylight
+  "people, filed" scene before the Ledger Houses, an S6 callback to Odd's
+  "third of next month"). They are authorial calls, not defects.
+
 ## 2026-07-02 — Productize the validated voice recipe + reliability pass
 
 **What changed**
