@@ -307,6 +307,22 @@ _SPEECH_VERBS = (r"said|asked|replied|whispered|shouted|exclaimed|cried|called|a
                  r"squealed|teased|admitted|hummed|sang")
 _TAG_ONLY = re.compile(
     rf"^[\s,;:\-]*([A-Z][a-zA-Z]+\s+)?(?:{_SPEECH_VERBS})\b", re.IGNORECASE)
+# Ranks and honorifics: part of how a person is named, never the name itself.
+_TITLE = (r"(?:Mr|Mrs|Ms|Miss|Dr|Sir|Lady|Lord|Master|Mistress|Captain|"
+          r"Professor|Auditor|Bursar|Chancellor|Doctor|Uncle|Aunt)")
+# Irregular verbs that turn up in an action beat ("Nessa put her hands flat").
+# Regular verbs are caught by their -ed/-s ending; these have neither.
+_ACTION_VERB = (
+    r"(?:said|went|got|put|took|made|saw|came|gave|told|felt|held|kept|left|"
+    r"sat|stood|ran|began|spoke|thought|knew|found|brought|caught|drew|threw|"
+    r"shook|struck|swung|bent|leant|rose|fell|hung|lay|laid|set|shut|slid|"
+    r"spun|swept|tore|woke|wore|won|wrote|did|had|was|were|is|are|bit|blew|"
+    r"broke|chose|dug|drank|drove|ate|flew|forgot|froze|hid|hit|let|lost|met|"
+    r"paid|read|rode|sang|sank|slept|spent|split|spread|stuck|swam|understood|"
+    r"woke|would|could|should|might|must)")
+# "she said" / "he said" — a tag that identifies a speaker without naming them.
+_PRONOUN_TAG = re.compile(
+    rf"^[\s,;:\-\"']*(?:he|she|they)\s+(?:{_SPEECH_VERBS})\b", re.IGNORECASE)
 
 
 def _norm_quotes(s: str) -> str:
@@ -345,6 +361,16 @@ _NON_NAMES = {
     "He", "She", "They", "It", "We", "You", "I", "His", "Her", "Their", "The",
     "A", "An", "And", "But", "Then", "Now", "With", "As", "When", "Finally",
     "Suddenly", "Just", "So", "There", "Here", "After", "Before", "Soon",
+    # Demonstratives, quantifiers and question words. These begin sentences and
+    # are followed by a verb exactly like a person's name is, so without them
+    # "That was the part…" puts a character called That in the cast.
+    "That", "This", "These", "Those", "Some", "Somebody", "Someone", "Something",
+    "Everybody", "Everyone", "Everything", "Nobody", "No", "Nothing", "Anybody",
+    "Anyone", "Anything", "Both", "Each", "Either", "Neither", "All", "Many",
+    "Most", "Much", "Few", "One", "Two", "Three", "What", "Where", "Why", "How",
+    "Which", "Who", "Whose", "Whom", "If", "Because", "Once", "While", "Until",
+    "Still", "Even", "Yet", "Perhaps", "Maybe", "Later", "Afterward", "Outside",
+    "Inside", "Above", "Below", "Beyond", "Behind", "Beneath", "Under", "Over",
 }
 
 
@@ -353,53 +379,287 @@ def _valid_name(name):
 
 
 def _attr_speaker(after: str, before: str):
+    """Speaker named in an explicit tag touching the quote, else None.
+
+    Titles are stripped ("said Bursar Quorn" -> Quorn) so the same person is not
+    booked under her rank in one line and her surname in the next.
+    """
     vb = f"(?i:{_SPEECH_VERBS})"  # verb may be any case; names must be capitalized
     # "said Name" or "Name said" immediately after the quote
-    for pat in (rf'^[\s,;:\-"\']*{vb}\s+([A-Z][a-zA-Z]+)',
-                rf'^[\s,;:\-"\']*([A-Z][a-zA-Z]+)\s+{vb}'):
+    for pat in (rf'^[\s,;:\-"\']*{vb}\s+(?:{_TITLE}\s+)?([A-Z][a-zA-Z]+)',
+                rf'^[\s,;:\-"\']*(?:{_TITLE}\s+)?([A-Z][a-zA-Z]+)\s+{vb}'):
         m = re.match(pat, after)
         if m and _valid_name(m.group(1)):
             return m.group(1)
     # "Name said," just before the quote
-    m = re.search(rf'([A-Z][a-zA-Z]+)\s+{vb}[\s,:\-]*$', before)
+    m = re.search(rf'(?:{_TITLE}\s+)?([A-Z][a-zA-Z]+)\s+{vb}[\s,:\-]*$', before)
     if m and _valid_name(m.group(1)):
         return m.group(1)
-    # fallback: the actor named in the immediately preceding narration
-    # (handles action beats like "Ezra nodded eagerly. <quote>")
-    names = [n for n in re.findall(r"[A-Z][a-zA-Z]+", before) if _valid_name(n)]
-    if names:
-        return names[-1]
     return None
 
 
-def _scriptify(draft: str) -> list:
-    """Split story prose into ordered lines: quoted speech -> character, rest -> Narrator."""
-    text = _norm_quotes(draft)
-    tokens = re.split(r'("[^"]*")', text)  # keep quoted spans as their own tokens
-    lines = []
-    last_speaker = None
-    for i, tok in enumerate(tokens):
-        if not tok:
+def _join_speech(a: str, b: str) -> str:
+    """Rejoin two halves of one speech that a tag was sitting between."""
+    a = a.rstrip()
+    if b[:1].islower():                       # b continues the same clause
+        if not a.endswith((",", ";", ":", "—", "-")):
+            a += ","
+        return a + " " + b.lstrip()
+    if a.endswith((",", ";", ":", "—", "-")):  # a comma only there for the tag
+        a = a[:-1].rstrip() + "."
+    elif not a.endswith((".", "!", "?", "…", '"')):
+        a += "."
+    return a + " " + b.lstrip()
+
+
+def _reflow_tags(lines: list) -> list:
+    """Lift a speech tag out from between two halves of the same speech.
+
+    Prose written for the page interrupts freely — `"Hundredweight," Nessa said.
+    "Off the boards."` — and read aloud that is one sentence chopped into three
+    clips by two silences, with the character's two halves rendered as separate
+    (and not reproducible) calls, so the voice can shift mid-sentence. Here the
+    speech is put back together and the tag follows it.
+
+    This runs on every story, including prose we did not write: the concierge
+    flow pastes in text that knows none of our conventions.
+    """
+    out, i = [], 0
+    while i < len(lines):
+        ln = lines[i]
+        if (i + 2 < len(lines)
+                and ln["character"] != "Narrator"
+                and lines[i + 1].get("is_tag")
+                and lines[i + 2]["character"] == ln["character"]
+                and lines[i + 2].get("para") == ln.get("para")):
+            joined = dict(ln)
+            joined["text"] = _join_speech(ln["text"], lines[i + 2]["text"])
+            out.append(joined)
+            out.append(lines[i + 1])
+            i += 3
             continue
-        if len(tok) >= 2 and tok[0] == '"' and tok[-1] == '"':  # a spoken quote
-            spoken = tok[1:-1].strip()
-            if not spoken:
+        # Two halves left touching because the tag between them was a bare one
+        # and got dropped. Same speaker, same paragraph, nothing in between —
+        # one utterance, and it should be rendered as one.
+        if (out and ln["character"] != "Narrator"
+                and out[-1]["character"] == ln["character"]
+                and out[-1].get("para") == ln.get("para")):
+            out[-1] = dict(out[-1],
+                           text=_join_speech(out[-1]["text"], ln["text"]))
+            i += 1
+            continue
+        out.append(ln)
+        i += 1
+    return out
+
+
+def _strip_titles(s: str) -> str:
+    """Drop ranks and honorifics so a name is just a name."""
+    return re.sub(rf"\b{_TITLE}\.?\s+", "", s or "")
+
+
+def _named_actors(narration: str, people=None) -> list:
+    """People named in a stretch of narration, in order of appearance.
+
+    Restricted to names we have reason to believe are PEOPLE. Capitalised words
+    are otherwise indistinguishable from place names — "the Tally Floor" would
+    put a character called Floor in the cast, with a voice of his own.
+    """
+    people = set(people or ())
+    out = []
+    for n in re.findall(r"[A-Z][a-zA-Z]+", narration or ""):
+        if n in people and n not in out:
+            out.append(n)
+    return out
+
+
+def _cast_names(draft: str, known_names=None) -> set:
+    """Names in this draft that plainly belong to people.
+
+    Three signals, any one of which is enough: already in the story's cast,
+    attached to a speech verb, or introduced by a rank or honorific
+    ("Auditor Crake"). Place names built like people names never qualify.
+    """
+    people = set(known_names or ())
+    vb = f"(?i:{_SPEECH_VERBS})"
+    # Titles are stripped rather than made optional: an optional group happily
+    # backtracks out of the way, so "Mr Vane" would otherwise parse as a person
+    # called Mr, and "Auditor Crake" as one called Auditor.
+    plain = _strip_titles(draft)
+    for pat in (rf'"[\s,;:\-]*{vb}\s+([A-Z][a-zA-Z]+)',
+                rf'"[\s,;:\-]*([A-Z][a-zA-Z]+)\s+{vb}',
+                rf'([A-Z][a-zA-Z]+)\s+{vb}[\s,:\-]*"'):
+        for m in re.finditer(pat, plain):
+            if _valid_name(m.group(1)):
+                people.add(m.group(1))
+    for m in re.finditer(rf'\b{_TITLE}\s+([A-Z][a-zA-Z]+)', draft):  # needs titles
+        if _valid_name(m.group(1)):
+            people.add(m.group(1))
+    # Subject of an action sentence: "Ezra nodded eagerly." An action beat is a
+    # perfectly ordinary way to say who is about to speak, and such a name may
+    # never appear next to a speech verb anywhere in the story.
+    #
+    # Anchored to the START of a sentence, which is where a name doing something
+    # sits. Unanchored, "the Tally Floor goes silent" and "the Sluice was warm"
+    # match the same shape and populate the cast with scenery.
+    # What follows must be a VERB. Regular ones end -ed/-s; the irregulars that
+    # show up in an action beat are a closed set. Accepting any lowercase word
+    # instead lets every sentence-opening adverb in — "Not one of them moved",
+    # "Beside him the lamp guttered" — and those become characters with voices.
+    for m in re.finditer(
+            rf"(?:^|[.!?…][\"')\]]?\s+)([A-Z][a-z]+)\s+(?:[a-z]+(?:ed|s)|{_ACTION_VERB})\b",
+            plain, re.MULTILINE):
+        if _valid_name(m.group(1)):
+            people.add(m.group(1))
+    return people
+
+
+def _alias_map(draft: str, known_names=None) -> dict:
+    """Fold every part of a person's full name onto ONE canonical name.
+
+    "Bursar Ilsabet Quorn" tagged as `Ilsabet` in one paragraph and picked up as
+    `Quorn` in the next would otherwise be two characters, cast as two different
+    voices in the same conversation.
+
+    Only names that actually speak (or are already in the cast) seed this, so
+    place names built the same way — Tally Floor, Barrow Sill, Cold Gantry —
+    never get mistaken for people. A part shared by two people ("Vane", for
+    Phillip and Tobin) is ambiguous and is deliberately left unmapped.
+    """
+    speakers = _cast_names(draft, known_names)
+    fulls = []
+    for m in re.finditer(
+            r"\b([A-Z][a-z]+)\s+([A-Z][a-z]+)\b", _strip_titles(draft)):
+        a, b = m.group(1), m.group(2)
+        if not (_valid_name(a) and _valid_name(b)):
+            continue
+        if a not in speakers and b not in speakers:
+            continue  # not a person, or at least not one with lines
+        if (a, b) not in fulls:
+            fulls.append((a, b))
+    # A family shares a surname. Phillip Vane and Tobin Vane must not fold into
+    # one "Vane" — that is a son and his father cast in a single voice.
+    shared = {b for i, (_, b) in enumerate(fulls)
+              if any(b == ob for j, (_, ob) in enumerate(fulls) if j != i)}
+    owners = {}   # part -> set of canonical names claiming it
+    for a, b in fulls:
+        canon = a if (b in shared or a in speakers) else b
+        owners.setdefault(a, set()).add(canon)
+        if b not in shared:
+            owners.setdefault(b, set()).add(canon)
+    return {part: next(iter(c)) for part, c in owners.items() if len(c) == 1}
+
+
+def _scriptify(draft: str, known_names=None) -> list:
+    """Split story prose into ordered lines: quoted speech -> character, rest -> Narrator.
+
+    Each line carries the index of the SOURCE PARAGRAPH it came from, and a flag
+    for narrator lines that are really a speech tag belonging to the line before
+    them ("...," Nessa said, not looking at the iron.). Both are prosody, not
+    content: they decide how much silence goes in front of the clip when the
+    story is stitched together (see _gaps_for_groups). Paragraph structure is
+    invisible in the finished text but audible in the finished audio, so it has
+    to survive this stage — nothing downstream can recover it.
+
+    A bare tag of <=6 words is still dropped; one carrying an action beat is kept
+    and marked, because it says something the character's voice cannot.
+    """
+    text = _norm_quotes(draft)
+    people = _cast_names(text, known_names)
+    alias = _alias_map(text, known_names)
+
+    def canon(name):
+        return alias.get(name, name) if name else name
+
+    lines = []
+    last_speaker = None       # who spoke most recently, anywhere
+    recent = []               # active speakers, most recent first
+    present = []              # everyone in the scene, whether they have spoken
+                              # yet or not — someone can be named, addressed and
+                              # then answer, and the answer is the first we hear
+                              # of their voice
+    para_of_last_quote = None
+    prev_line_was_quote = False
+    recent_narration = ""     # carries across paragraphs — a paragraph that opens
+                              # on a quote still needs to know who was just named
+    para_idx = 0
+    for para in re.split(r"\n\s*\n", text):
+        if not para.strip():
+            continue
+        tokens = re.split(r'("[^"]*")', para)  # keep quoted spans as their own tokens
+        first_in_para = len(lines)
+        for i, tok in enumerate(tokens):
+            if not tok:
                 continue
-            after = tokens[i + 1] if i + 1 < len(tokens) else ""
-            before = tokens[i - 1] if i >= 1 else ""
-            speaker = _attr_speaker(after, before) or last_speaker or "Narrator"
-            if speaker != "Narrator":
-                last_speaker = speaker
-            lines.append({"character": speaker,
-                          "emotion": _emotion_for(spoken, speaker == "Narrator"),
-                          "text": spoken})
-        else:  # narration
-            for sent in _split_sentences(tok):
-                if _TAG_ONLY.match(sent) and len(sent.split()) <= 6:
-                    continue  # drop bare speech-tag fragments ("said Leo, smiling.")
-                lines.append({"character": "Narrator",
-                              "emotion": _emotion_for(sent, True), "text": sent})
-    return lines or [{"character": "Narrator", "emotion": "warm", "text": draft.strip()}]
+            if len(tok) >= 2 and tok[0] == '"' and tok[-1] == '"':  # a spoken quote
+                spoken = tok[1:-1].strip()
+                if not spoken:
+                    continue
+                after = tokens[i + 1] if i + 1 < len(tokens) else ""
+                before = tokens[i - 1] if i >= 1 else ""
+                actors = (_named_actors(before, people)
+                          or _named_actors(recent_narration, people))
+
+                speaker = canon(_attr_speaker(after, before))
+                if not speaker and _PRONOUN_TAG.match(after or ""):
+                    # "she said" — the tag identifies a speaker without naming
+                    # them; the last person named in narration is who it means.
+                    speaker = canon(actors[-1]) if actors else None
+                if not speaker and para_idx == para_of_last_quote:
+                    # still inside the paragraph that was already speaking: a
+                    # quote broken by its own action beat is the same person
+                    speaker = last_speaker
+                if not speaker and prev_line_was_quote:
+                    # new paragraph, no tag: dialogue alternates
+                    speaker = next((s for s in present if s != last_speaker), None)
+                if not speaker:
+                    speaker = canon(actors[-1]) if actors else last_speaker
+                # Someone addressed by name is being spoken TO, not speaking:
+                # "Nessa —" is Phillip talking to Nessa, and "It is not praise,
+                # Mr Vane" cannot be Vane. Direct address sits at the start of a
+                # line or after a comma; anywhere else the name is just a
+                # subject ("Nessa did not laugh").
+                for m in re.finditer(
+                        rf'(?:^\s*|,\s*)(?:{_TITLE}\s+)?([A-Z][a-zA-Z]+)\b', spoken):
+                    if speaker and canon(m.group(1)) == speaker:
+                        other = next((s for s in recent if s != speaker), None)
+                        if other:
+                            speaker = other
+                        break
+                speaker = speaker or "Narrator"
+
+                if speaker != "Narrator":
+                    last_speaker = speaker
+                    recent = [speaker] + [s for s in recent if s != speaker]
+                    present = [speaker] + [s for s in present if s != speaker]
+                para_of_last_quote = para_idx
+                prev_line_was_quote = True
+                recent_narration = ""
+                lines.append({"character": speaker,
+                              "emotion": _emotion_for(spoken, speaker == "Narrator"),
+                              "text": spoken, "para": para_idx, "is_tag": False})
+            else:  # narration
+                recent_narration = (recent_narration + " " + tok)[-600:]
+                for a in _named_actors(tok, people):
+                    a = canon(a)
+                    present = [a] + [s for s in present if s != a]
+                for sent in _split_sentences(tok):
+                    is_tag = bool(_TAG_ONLY.match(sent)) or bool(_PRONOUN_TAG.match(sent))
+                    if is_tag and len(sent.split()) <= 6:
+                        continue  # drop bare tags ("said Leo, smiling.")
+                    # A tag only belongs to the line before it if that line was
+                    # someone speaking; otherwise it is ordinary narration.
+                    belongs = (is_tag and lines
+                               and lines[-1]["character"] != "Narrator")
+                    prev_line_was_quote = False
+                    lines.append({"character": "Narrator",
+                                  "emotion": _emotion_for(sent, True), "text": sent,
+                                  "para": para_idx, "is_tag": belongs})
+        if len(lines) > first_in_para:
+            para_idx += 1  # only count paragraphs that actually produced lines
+    return _reflow_tags(lines) or [{"character": "Narrator", "emotion": "warm",
+                                    "text": draft.strip(), "para": 0,
+                                    "is_tag": False}]
 
 
 def _character_designer(draft: str, existing_names: list) -> list:
@@ -540,6 +800,10 @@ def _merge_render_groups(stored: list, max_chars: int = None) -> list:
     Consecutive NARRATOR lines merge into one clip (soft char cap) for smooth
     narration; each character line stays solo so it keeps its own per-line
     emotion instruct. Returns groups in story order.
+
+    Narrator lines are NOT merged across a paragraph boundary: swallowing the
+    boundary into one clip would make the pause between two thoughts
+    unreachable, and there is supposed to be one there.
     """
     if max_chars is None:
         max_chars = config.NARRATOR_MERGE_CHARS
@@ -551,7 +815,9 @@ def _merge_render_groups(stored: list, max_chars: int = None) -> list:
             continue
         is_narr = (ln.get("character_name") or "").strip().lower() in (
             "", "narrator", "the narrator")
-        if is_narr and cur is not None and len(cur["text"]) + 1 + len(text) <= max_chars:
+        para = int(ln.get("para") or 0)
+        if (is_narr and cur is not None and cur["para"] == para
+                and len(cur["text"]) + 1 + len(text) <= max_chars):
             cur["text"] += " " + text
             cur["line_ids"].append(ln["id"])
             continue
@@ -564,10 +830,33 @@ def _merge_render_groups(stored: list, max_chars: int = None) -> list:
             "voice_instruct": ln.get("voice_instruct"),
             "character_id": ln.get("character_id"),
             "emotion": ln.get("emotion"),
+            "para": para,
+            # only meaningful on the FIRST line of a group, which is where a tag
+            # always lands (the character line before it closes any open group)
+            "is_tag": bool(ln.get("is_tag")),
+            "is_narrator": is_narr,
         }
         groups.append(g)
         cur = g if is_narr else None
     return groups
+
+
+def _gaps_for_groups(groups: list) -> list:
+    """Silence (seconds) to insert BEFORE each clip after the first.
+
+    Three kinds of boundary, three lengths — a flat gap makes a speaker and
+    their own tag sound like two separate utterances, and makes the end of a
+    thought sound the same as the middle of one.
+    """
+    gaps = []
+    for prev, nxt in zip(groups, groups[1:]):
+        if nxt.get("is_tag") and not prev.get("is_narrator", False):
+            gaps.append(config.TTS_GAP_TAG)      # one sentence, two voices
+        elif nxt.get("para", 0) != prev.get("para", 0):
+            gaps.append(config.TTS_GAP_PARA)     # a new thought
+        else:
+            gaps.append(config.TTS_GAP_SECONDS)  # a new line
+    return gaps
 
 
 def _clone_ref(group: dict, chars_by_id: dict) -> tuple:
@@ -610,8 +899,14 @@ def _render_group(group: dict, chars_by_id: dict, out_path: str) -> str:
     return "silent"
 
 
-def _concat_wavs(paths: list, out_path: str, gap_seconds: float = None) -> None:
-    """Join clips in story order with a short gap between them.
+def _concat_wavs(paths: list, out_path: str, gap_seconds: float = None,
+                 gaps: list = None) -> None:
+    """Join clips in story order, with silence between them.
+
+    `gaps` gives a per-boundary length (one entry per join, from
+    _gaps_for_groups); `gap_seconds` is the flat fallback when the caller has no
+    prosody information. A missing or short `gaps` list falls back per boundary,
+    so a caller can never silently lose a join.
 
     Clips can arrive with different sample rates (e.g. silent fallbacks written
     before the model's rate is known vs. real 24 kHz TTS clips) — everything is
@@ -621,17 +916,25 @@ def _concat_wavs(paths: list, out_path: str, gap_seconds: float = None) -> None:
     if gap_seconds is None:
         gap_seconds = config.TTS_GAP_SECONDS
     clips = []
-    for p in paths:
+    kept = []  # gap index travels with the clip, so missing files don't shift it
+    for i, p in enumerate(paths):
         if not p or not os.path.exists(p):
             continue
         with wave.open(p, "rb") as w:
             clips.append((w.getframerate(), w.getnchannels(), w.getsampwidth(),
                           w.readframes(w.getnframes())))
+        kept.append(i)
     if not clips:
         _write_silence(out_path, 1.0)
         return
     rate = clips[0][0]
-    gap = b"\x00\x00" * int(gap_seconds * rate)
+    silence = {}
+
+    def _gap_bytes(seconds):
+        if seconds not in silence:
+            silence[seconds] = b"\x00\x00" * int(seconds * rate)
+        return silence[seconds]
+
     data = bytearray()
     for i, (r, ch, sw, frames) in enumerate(clips):
         if ch == 2:
@@ -641,7 +944,10 @@ def _concat_wavs(paths: list, out_path: str, gap_seconds: float = None) -> None:
         if r != rate:
             frames, _ = audioop.ratecv(frames, 2, 1, r, rate, None)
         if i:
-            data += gap
+            # the join before clip i is the boundary at its original index - 1
+            gi = kept[i] - 1
+            secs = gaps[gi] if (gaps and 0 <= gi < len(gaps)) else gap_seconds
+            data += _gap_bytes(secs)
         data += frames
     with wave.open(out_path, "wb") as w:
         w.setnchannels(1)
@@ -738,7 +1044,10 @@ def _run_job(story_id: int) -> None:
 
         # 6) Scriptify into a playwright script
         db.update_story_progress(story_id, "scripting", "Formatting the script…", 56)
-        raw_lines = _scriptify(draft)
+        # The known cast seeds speaker attribution: a name we already have a
+        # character (and a voice) for is a person, not a place.
+        raw_lines = _scriptify(
+            draft, known_names=[c["name"] for c in global_chars if c.get("name")])
 
         # Resolve a voice for every line and persist the script.
         lines = []
@@ -794,7 +1103,8 @@ def _run_job(story_id: int) -> None:
         tts.unload()  # free VRAM between stories
 
         final_audio = os.path.join(config.AUDIO_DIR, f"story_{story_id}.wav")
-        _concat_wavs([g["clip_path"] for g in groups], final_audio)
+        _concat_wavs([g["clip_path"] for g in groups], final_audio,
+                     gaps=_gaps_for_groups(groups))
 
         # 8) Done
         db.set_story_result(story_id, title, draft, summary, final_audio)

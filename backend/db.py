@@ -113,7 +113,12 @@ def init_db() -> None:
                 voice_instruct TEXT,                       -- instruct string fed to Qwen TTS
                 audio_path     TEXT,                       -- per-line clip (merged narrator
                                                            -- lines share one clip)
-                status         TEXT NOT NULL DEFAULT 'pending'  -- pending|done|silent
+                status         TEXT NOT NULL DEFAULT 'pending', -- pending|done|silent
+                -- Prosody: which paragraph of the source prose this line came from,
+                -- and whether it is a speech tag belonging to the line before it.
+                -- Both drive the length of the silence inserted before the clip.
+                para           INTEGER NOT NULL DEFAULT 0,
+                is_tag         INTEGER NOT NULL DEFAULT 0
             );
             CREATE INDEX IF NOT EXISTS idx_story_lines_story
                 ON story_lines (story_id, seq);
@@ -132,6 +137,8 @@ def init_db() -> None:
         })
         _ensure_columns(c, "story_lines", {
             "voice_mode": "voice_mode TEXT NOT NULL DEFAULT 'preset'",
+            "para": "para INTEGER NOT NULL DEFAULT 0",
+            "is_tag": "is_tag INTEGER NOT NULL DEFAULT 0",
         })
 
 
@@ -345,8 +352,9 @@ def replace_story_lines(story_id: int, lines: list) -> None:
         c.executemany(
             """INSERT INTO story_lines
                (story_id, seq, character_name, character_id, emotion, text,
-                voice_mode, speaker, voice_instruct, audio_path, status)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                voice_mode, speaker, voice_instruct, audio_path, status,
+                para, is_tag)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             [
                 (
                     story_id, i,
@@ -359,6 +367,8 @@ def replace_story_lines(story_id: int, lines: list) -> None:
                     ln.get("voice_instruct"),
                     ln.get("audio_path"),
                     ln.get("status") or "pending",
+                    int(ln.get("para") or 0),
+                    1 if ln.get("is_tag") else 0,
                 )
                 for i, ln in enumerate(lines)
             ],

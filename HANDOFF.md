@@ -2,6 +2,89 @@
 
 Terse trail of behavior changes: what changed, why, gotchas. Newest first.
 
+## 2026-08-07 — Prosody: gap length now depends on what the boundary means
+
+**What changed**
+
+- **Three gap tiers instead of one flat 0.28 s** (`config.TTS_GAP_TAG` 0.12 /
+  `TTS_GAP_SECONDS` 0.28 / `TTS_GAP_PARA` 0.5), chosen per join by
+  `generation._gaps_for_groups`:
+  - **TAG** — a character line followed by its own trailing speech tag. That is
+    ONE sentence in two voices and must not sound like two utterances.
+  - **LINE** — the validated 0.28 s, between lines inside one paragraph.
+  - **PARA** — across a paragraph break: one thought ending, the next starting.
+- **Paragraph structure now survives `_scriptify`.** Lines carry `para` (source
+  paragraph index) and `is_tag`. Nothing downstream could recover this — the
+  splitter used to flatten the prose and the boundary was gone for good.
+- **`_merge_render_groups` no longer merges narrator lines across a paragraph
+  break** — merging swallowed the boundary into one clip and made the pause
+  unreachable.
+- **`_concat_wavs(paths, out, gaps=[...])`** takes a per-boundary list; the flat
+  `gap_seconds` remains the fallback. Gap indices travel with the clip, so a
+  clip that failed to render cannot shift every later gap by one.
+- **Schema**: `story_lines.para`, `story_lines.is_tag` via `_ensure_columns`.
+- **Tests**: 9 new (34 total). `py -m unittest discover -s tests`.
+
+**Gotchas**
+
+- Stories written before this migrate to `para=0` on every line, so they get no
+  PARA gaps and render exactly as they did. Only re-scriptified stories improve.
+- `_scriptify` still DROPS bare speech tags of <=6 words, but a tag carrying an
+  action beat is longer than that, survives, and becomes a real narrator clip.
+  So "richer tags" and "tags must not interrupt a speech" are the same rule:
+  the richer the tag, the worse a mid-speech one sounds.
+- The tight TAG gap only applies when a CHARACTER spoke before the tag. A tag
+  after narration is ordinary narration and gets the normal gap.
+
+## 2026-08-07 — Speaker attribution rewritten; mid-speech tags reflowed
+
+Found while building the gap tiers: `_scriptify` mis-cast most dialogue. On a
+real chapter Phillip got 25 of 29 spoken lines, Nessa 1, and Ilsabet Quorn was
+split into two characters cast as two different voices in one scene. Silent in
+the text, ruinous in audio — the whole cast in the hero's voice.
+
+**What changed** (`generation.py`)
+
+- **Pronoun tags resolve.** `"Vane," she said` now attributes to the last person
+  named in narration, so the invigilator keeps her own line.
+- **Forename and surname unify** (`_alias_map`): Ilsabet / Quorn are one person.
+  A surname shared by two characters (Phillip Vane, Tobin Vane) is deliberately
+  left unmapped — folding it would put a father's lines in his son's voice.
+- **Untagged exchanges alternate** instead of sticking to `last_speaker`, using
+  everyone *present in the scene*, not only those who have already spoken — a
+  character can be named, addressed, and then answer.
+- **Direct address is not speech.** "Nessa —" is Phillip talking to Nessa, and
+  "It is not praise, Mr Vane" cannot be Vane. Checked at a line's start and
+  after any comma.
+- **Only people become speakers** (`_cast_names`): a name qualifies via the
+  story's cast, a speech verb, a title, or being the subject of an action
+  sentence. Titles are stripped, never optional — an optional group backtracks,
+  so "Mr Vane" parsed as a person called Mr. Place names built like people
+  names ("the Tally Floor goes silent") no longer join the cast.
+- **`_reflow_tags`** lifts a speech tag out from between two halves of one
+  speech and rejoins the speech, including when the tag was dropped for being
+  short. Arc-wide this cut character clips 321 -> 260: fewer renders, less GPU,
+  and no sentence split across two non-reproducible VoiceDesign calls.
+- `_scriptify(draft, known_names=...)` — `_run_job` passes the known cast.
+- **Tests**: 15 new (49 total).
+
+**Verification**
+
+Session 1 of the arc, checked line by line against the prose: 15/15 spoken lines
+correct, from 2/13 before. Across all seven sessions only 3 lines out of ~260
+still resolve to scenery rather than a person.
+
+**Still wrong**
+
+- Nicknames are not unified: `Odalric "Odd" Pell` yields both "Odd" and
+  "Odalric" (and once "Pell") — three voices for one boy. Needs an alias field
+  on `characters`, or the nickname form parsed out of the prose.
+- Chapters are scriptified independently, so an alias only holds if the full
+  name appears in *that* chapter. In the app `known_names` covers this; scanning
+  a loose file does not.
+- Attribution is verified line-by-line for session 1 only. The other six are
+  much improved and spot-checked, not audited.
+
 ## 2026-08-07 — First multi-night arc, written outside the app (PLAN §3 / §8 dry run)
 
 **What changed**

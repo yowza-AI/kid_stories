@@ -79,8 +79,16 @@ NARRATOR_REF_TEXT = os.environ.get(
 # Merge consecutive narrator lines into one clip up to this soft char cap
 # (smooth narration, fewer clips); character lines stay solo (per-line emotion).
 NARRATOR_MERGE_CHARS = int(os.environ.get("NARRATOR_MERGE_CHARS", "380"))
-# Silence inserted between clips when concatenating the final audio.
+# Silence inserted between clips when concatenating the final audio. The gap is
+# chosen by what the boundary MEANS, not one flat value — a speaker and their own
+# trailing tag are one sentence and must not sound like two, while the end of a
+# thought wants room before the next one starts.
+#   TAG   "…Sixty's long," | Nessa said, not looking at the iron.   (one sentence)
+#   LINE  normal beat between lines inside the same paragraph       (validated 0.28)
+#   PARA  one paragraph ends and the next begins                    (a new thought)
 TTS_GAP_SECONDS = float(os.environ.get("TTS_GAP_SECONDS", "0.28"))
+TTS_GAP_TAG = float(os.environ.get("TTS_GAP_TAG", "0.12"))
+TTS_GAP_PARA = float(os.environ.get("TTS_GAP_PARA", "0.5"))
 
 # --- Qwen3-TTS preset speakers (verified from the CustomVoice model card) ---
 # A character pinned to a fixed preset speaker sounds the SAME every appearance

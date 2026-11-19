@@ -10,9 +10,9 @@ Three hundred students sat in grey wool and fingerless gloves, writing out their
 
 Nessa Bellhook sat on his left with her boots hooked round the bench legs and her hands flat on the desk, which was what she did instead of fidgeting.
 
-"Hundredweight," Nessa said. "Off the boards. Count of sixty. That's a slack rope, Vane. Sixty's long."
+"Hundredweight. Off the boards. Count of sixty. That's a slack rope, Vane. Sixty's long," Nessa said, and did not once look at the iron while she said it.
 
-"Sixty's honest," Phillip said. "They priced it fair. They usually do." He heard how that sounded, one beat too late, and added, "Which is the worst thing about them."
+"Sixty's honest. They priced it fair. They usually do," Phillip said. He heard how that sounded, one beat too late, and added, "Which is the worst thing about them."
 
 Nessa did not laugh, which told him everything about how her morning was going.
 
@@ -22,7 +22,7 @@ They called him first. Alphabetical was Bellhook before Vane, but the invigilati
 
 He knelt on the boards. The chalk was cold. He drew the tally-sigil the way you are taught in Tally year — the ring, the crossbar, the little hook at the end that closes the account — and set his palm flat inside it, and looked at the iron, and began.
 
-"The winch handle at Gantry Lock Four," Phillip said, "in November, before the sun's up."
+"The winch handle at Gantry Lock Four, in November, before the sun's up," Phillip said.
 
 The nibs stopped. Three hundred of them, all at once. That was the part nobody warned you about in first year: the Tally Floor goes silent when somebody spends, because everybody wants to hear what a thing is worth.
 

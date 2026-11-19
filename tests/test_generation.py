@@ -201,6 +201,206 @@ class TestConcatWavs(unittest.TestCase):
         self.assertTrue(os.path.exists(out))
 
 
+class TestSpeakerAttribution(unittest.TestCase):
+    """Who says what. Getting this wrong is inaudible in the text and casts the
+    whole scene in one voice in the audio."""
+
+    def _spoken(self, draft, **kw):
+        return [(l["character"], l["text"])
+                for l in g._scriptify(draft, **kw) if l["character"] != "Narrator"]
+
+    def test_pronoun_tag_resolves_to_last_named_actor(self):
+        draft = ('Auditor Crake went down the list and did not look up.\n\n'
+                 '"Vane. Chalk your sigil and pay," she said.')
+        self.assertEqual(self._spoken(draft), [("Crake", "Vane. Chalk your sigil and pay,")])
+
+    def test_forename_and_surname_are_one_character(self):
+        draft = ('Bursar Ilsabet Quorn stood at the rail.\n\n'
+                 '"Bond thirty-three," said Ilsabet.\n\n'
+                 '"It is a record," Quorn added.')
+        self.assertEqual({c for c, _ in self._spoken(draft)}, {"Ilsabet"})
+
+    def test_untagged_exchange_alternates_between_paragraphs(self):
+        # both speakers have to be established first — nothing can alternate
+        # onto a character the text has never mentioned
+        draft = ('"Sixty is honest," Phillip said.\n\n'
+                 'Nessa put her hands flat on the desk.\n\n'
+                 '"You were."\n\n"I wasn\'t going to."\n\n"You were."')
+        self.assertEqual([c for c, _ in self._spoken(draft)],
+                         ["Phillip", "Nessa", "Phillip", "Nessa"])
+
+    def test_speaker_continues_through_own_action_beat(self):
+        # same paragraph: the narration between the quotes is her, still speaking
+        draft = ('Nessa got up.\n\n'
+                 '"Don\'t." She was already gathering her chalk. "Don\'t gantry me."')
+        self.assertEqual([c for c, _ in self._spoken(draft)], ["Nessa", "Nessa"])
+
+    def test_person_addressed_by_name_is_not_the_speaker(self):
+        draft = ('"Sixty is honest," Phillip said.\n\n'
+                 'Nessa got up off her knees.\n\n"Nessa —"\n\n"Don\'t."')
+        self.assertEqual([c for c, _ in self._spoken(draft)][1:], ["Phillip", "Nessa"])
+
+    def test_vocative_after_a_comma_also_counts(self):
+        draft = ('Bursar Ilsabet Quorn watched from the rail.\n\n'
+                 '"Thank you, Bursar," Phillip Vane said.\n\n'
+                 '"It is not praise, Mr Vane. It is a record."')
+        self.assertEqual(self._spoken(draft)[1][0], "Ilsabet")
+
+    def test_place_names_never_become_speakers(self):
+        # "the Tally Floor goes silent" has the shape of an action beat
+        draft = ('The Tally Floor goes silent when somebody spends.\n\n'
+                 '"It is iron, and it is cold."')
+        self.assertNotIn("Floor", [c for c, _ in self._spoken(draft)])
+
+    def test_action_beat_still_names_the_speaker(self):
+        # the old behaviour must survive the people-filter
+        self.assertEqual(self._spoken('Ezra nodded eagerly. "Yes!"'), [("Ezra", "Yes!")])
+
+    def test_known_cast_seeds_attribution(self):
+        draft = 'Marrable turned the key.\n\n"Nine galleries."'
+        self.assertEqual(self._spoken(draft, known_names=["Marrable"])[0][0], "Marrable")
+
+    def test_titles_are_not_names(self):
+        self.assertEqual(g._strip_titles("Bursar Ilsabet Quorn and Mr Vane"),
+                         "Ilsabet Quorn and Vane")
+        self.assertNotIn("Mr", g._cast_names('"Yes," said Mr Vane.'))
+
+    def test_shared_surname_stays_ambiguous(self):
+        # Phillip Vane and Tobin Vane both claim "Vane" — mapping it would put
+        # the father's lines in the son's voice
+        alias = g._alias_map('Phillip Vane rowed. Tobin Vane said, "Get the rope in."')
+        self.assertNotIn("Vane", alias)
+
+
+class TestMidSpeechTagReflow(unittest.TestCase):
+    """A tag between two halves of one speech is put back where it belongs.
+    Needed for prose we did not write — the concierge flow pastes in text that
+    follows none of our conventions."""
+
+    def test_interrupted_speech_is_rejoined(self):
+        lines = g._scriptify(
+            'Nessa Bellhook waited.\n\n'
+            '"Hundredweight," Nessa said, and did not look at the iron. '
+            '"Off the boards."')
+        self.assertEqual(
+            [(l["character"], l["text"]) for l in lines if l["text"].strip()][-2:],
+            [("Nessa", "Hundredweight. Off the boards."),
+             ("Narrator", "Nessa said, and did not look at the iron.")])
+
+    def test_continuing_clause_keeps_its_comma(self):
+        # the second half starts lowercase: it is the same clause, not a new one
+        self.assertEqual(
+            g._join_speech("The winch handle at Lock Four,", "in November."),
+            "The winch handle at Lock Four, in November.")
+
+    def test_join_promotes_a_tag_comma_to_a_stop(self):
+        self.assertEqual(g._join_speech("Hundredweight,", "Off the boards."),
+                         "Hundredweight. Off the boards.")
+
+    def test_different_speakers_are_never_joined(self):
+        lines = g._scriptify(
+            'Hew Marrable turned the key.\n\n'
+            '"Nine galleries," Marrable said, steering him back. "Don\'t touch."')
+        spoken = [l for l in lines if l["character"] != "Narrator"]
+        self.assertEqual(len(spoken), 1)          # same speaker -> one clip
+        self.assertIn("Nine galleries", spoken[0]["text"])
+
+
+class TestParagraphsAndGaps(unittest.TestCase):
+    """Prosody: paragraph structure must survive scriptify, and the gap between
+    two clips must reflect what the boundary means."""
+
+    DRAFT = (
+        '"Hundredweight. Count of sixty," Nessa said, and did not once look at '
+        'the iron while she said it.\n\n'
+        '"Sixty\'s honest," Phillip said.\n\n'
+        'The nibs stopped. Three hundred of them, all at once.'
+    )
+
+    def test_paragraph_index_survives_scriptify(self):
+        lines = g._scriptify(self.DRAFT)
+        self.assertEqual(sorted({l["para"] for l in lines}), [0, 1, 2])
+
+    def test_loaded_tag_is_kept_and_marked(self):
+        # >6 words, so it survives the bare-tag filter and becomes a real clip
+        lines = g._scriptify(self.DRAFT)
+        tags = [l for l in lines if l["is_tag"]]
+        self.assertEqual(len(tags), 1)
+        self.assertIn("did not once look at the iron", tags[0]["text"])
+        self.assertEqual(tags[0]["character"], "Narrator")
+
+    def test_bare_tag_is_still_dropped(self):
+        lines = g._scriptify('"Sixty\'s honest," Phillip said.')
+        self.assertEqual([l["character"] for l in lines], ["Phillip"])
+
+    def test_narration_after_narration_is_not_a_tag(self):
+        # a tag only belongs to the line before it if that line was speech
+        lines = g._scriptify("He knelt on the boards. Crake said nothing at all for a while.")
+        self.assertFalse(any(l["is_tag"] for l in lines))
+
+    def test_narrator_lines_do_not_merge_across_paragraphs(self):
+        stored = [
+            {"id": 1, "seq": 0, "character_name": "Narrator", "text": "One.", "para": 0},
+            {"id": 2, "seq": 1, "character_name": "Narrator", "text": "Two.", "para": 0},
+            {"id": 3, "seq": 2, "character_name": "Narrator", "text": "Three.", "para": 1},
+        ]
+        groups = g._merge_render_groups(stored, max_chars=400)
+        self.assertEqual(len(groups), 2)
+        self.assertEqual(groups[0]["text"], "One. Two.")
+        self.assertEqual(groups[1]["text"], "Three.")
+
+    def _groups(self):
+        stored = [
+            {"id": 1, "seq": 0, "character_name": "Nessa", "text": "Count of sixty.",
+             "para": 0, "is_tag": 0},
+            {"id": 2, "seq": 1, "character_name": "Narrator", "para": 0, "is_tag": 1,
+             "text": "Nessa said, and did not once look at the iron."},
+            {"id": 3, "seq": 2, "character_name": "Narrator", "para": 0, "is_tag": 0,
+             "text": "The nibs stopped."},
+            {"id": 4, "seq": 3, "character_name": "Narrator", "para": 1, "is_tag": 0,
+             "text": "They called him first."},
+        ]
+        return g._merge_render_groups(stored, max_chars=20)
+
+    def test_three_gap_tiers(self):
+        gaps = g._gaps_for_groups(self._groups())
+        self.assertEqual(gaps, [config.TTS_GAP_TAG,       # speech -> its own tag
+                                config.TTS_GAP_SECONDS,   # tag -> next line, same para
+                                config.TTS_GAP_PARA])     # across a paragraph break
+        self.assertLess(config.TTS_GAP_TAG, config.TTS_GAP_SECONDS)
+        self.assertLess(config.TTS_GAP_SECONDS, config.TTS_GAP_PARA)
+
+    def test_tag_after_narration_gets_an_ordinary_gap(self):
+        # is_tag only tightens the gap when a CHARACTER was speaking before it
+        groups = [{"para": 0, "is_tag": False, "is_narrator": True},
+                  {"para": 0, "is_tag": True, "is_narrator": True}]
+        self.assertEqual(g._gaps_for_groups(groups), [config.TTS_GAP_SECONDS])
+
+    def test_concat_uses_per_boundary_gaps(self):
+        tmp = tempfile.mkdtemp()
+        paths = []
+        for i in range(3):
+            p = os.path.join(tmp, f"c{i}.wav")
+            g._write_silence(p, 0.5)
+            paths.append(p)
+        out = os.path.join(tmp, "out.wav")
+        g._concat_wavs(paths, out, gaps=[0.1, 0.9])
+        with wave.open(out, "rb") as w:
+            duration = w.getnframes() / w.getframerate()
+        self.assertAlmostEqual(duration, 1.5 + 0.1 + 0.9, delta=0.05)
+
+    def test_missing_clip_does_not_shift_remaining_gaps(self):
+        # clip 1 never rendered; the join before clip 2 must still use gaps[1]
+        tmp = tempfile.mkdtemp()
+        a = os.path.join(tmp, "a.wav"); g._write_silence(a, 0.5)
+        c = os.path.join(tmp, "c.wav"); g._write_silence(c, 0.5)
+        out = os.path.join(tmp, "out.wav")
+        g._concat_wavs([a, os.path.join(tmp, "gone.wav"), c], out, gaps=[0.1, 0.9])
+        with wave.open(out, "rb") as w:
+            duration = w.getnframes() / w.getframerate()
+        self.assertAlmostEqual(duration, 1.0 + 0.9, delta=0.05)
+
+
 class TestInstructBuilders(unittest.TestCase):
     def test_design_instruct_combines_description_and_emotion(self):
         s = g._design_instruct("a gruff old badger", "grumpy")
